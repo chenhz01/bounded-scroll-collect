@@ -4,6 +4,8 @@ A generic bounded collection loop for paginated and scroll-based feeds: explicit
 
 **Confidence: High (85%)** that budgeted stop conditions + dedup cut the runaway-loop failure mode of scroll automation; **Medium (65%)** that nine named stop reasons cover your provider's failure vocabulary [estimated].
 
+<p align="center"><img src="docs/demo.gif" alt="demo" width="720"></p>
+
 ## Problem
 
 "Keep scrolling until you've got everything" is where automation goes feral: the feed re-shows the same ten posts forever, the collector retries a glitched page 500 times, or the loop simply never ends while the operator watches. GUI-automation practice (e.g. mobile-agent work as of 2026-10-11) converged on a safety pattern — bounded attempts, uncertainty pauses, trust only structured tool output — but it lives inside platform-specific toolkits. The pattern itself is platform-free and deserves a 200-line, dependency-free implementation.

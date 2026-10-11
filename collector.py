@@ -15,6 +15,7 @@ value, and every failure mode *stops* rather than retries.
 """
 from __future__ import annotations
 
+import json
 import time
 from typing import Any, Callable, Dict, List, Optional
 
@@ -68,34 +69,64 @@ def default_key(item: Any) -> Any:
     return json_key(item)
 
 
-def collect(fetch: Callable[[Optional[dict]], dict], config: CollectorConfig) -> dict:
+def _canon(key: Any) -> str:
+    """Canonical string form of a dedup key (JSON, sorted keys, repr fallback)."""
+    return json.dumps(key, sort_keys=True, default=repr)
+
+
+def collect(fetch: Callable[[Optional[dict]], dict], config: CollectorConfig,
+            state: Optional[dict] = None) -> dict:
     """Run a bounded collection loop.
 
     fetch(cursor) -> {"items": [...], "has_more": bool, "cursor": next|None,
-                      "ambiguous": bool (optional), "error": str (optional)}
+                      "ambiguous": bool (optional), "error": str (optional),
+                      "tokens": int (optional, page cost for the ledger)}
     The provider contract: on any page where state can't be trusted, return
     ambiguous=True. The collector then PAUSES. It never re-fetches on its own.
+
+    state: optional dict from save_snapshot() to resume a prior session with
+    items, seen-keys, cursor, and ledger counters restored.
     """
-    items: List[Any] = []
-    seen = set()
-    cursor = None
-    consecutive_dups = 0
-    pages = 0
+    if state is not None:
+        missing = [k for k in _SNAPSHOT_KEYS if k not in state]
+        if missing:
+            raise ValueError("bad snapshot: missing %s" % ", ".join(missing))
+        items = list(state["items"])
+        seen = set(state["seen"])
+        cursor = state["cursor"]
+        consecutive_dups = state["consecutive_dups"]
+        pages = state["pages"]
+        provider_errors = state["provider_errors"]
+        requests = state["requests"]
+        tokens = state["tokens"]
+    else:
+        items: List[Any] = []
+        seen = set()
+        cursor = None
+        consecutive_dups = 0
+        pages = 0
+        provider_errors = 0
+        requests = 0
+        tokens = 0
+
     start = time.monotonic()
     stop_reason = None
-    provider_errors = 0
 
     while True:
         if pages >= config.max_steps:
             stop_reason = "BUDGET_STEPS"
             break
+        if config.max_requests is not None and requests >= config.max_requests:
+            stop_reason = "BUDGET_REQUESTS"
+            break
         if time.monotonic() - start >= config.time_budget_s:
             stop_reason = "TIME_BUDGET"
             break
 
+        requests += 1
         try:
             page = fetch(cursor)
-        except Exception as e:  # provider blew up: stop, don't retry
+        except Exception:  # provider blew up: stop, don't retry
             provider_errors += 1
             stop_reason = "PROVIDER_ERROR"
             break
@@ -109,10 +140,12 @@ def collect(fetch: Callable[[Optional[dict]], dict], config: CollectorConfig) ->
             stop_reason = "AMBIGUOUS_PAUSE"
             break
 
+        tokens += int(page.get("tokens", config.default_page_tokens) or 0)
+
         new_count = 0
         dup_count = 0
         for item in page.get("items", []):
-            key = config.dedup_key(item)
+            key = _canon(config.dedup_key(item))
             if key in seen:
                 dup_count += 1
                 continue
@@ -131,6 +164,10 @@ def collect(fetch: Callable[[Optional[dict]], dict], config: CollectorConfig) ->
             stop_reason = "DUP_LIMIT"
             break
 
+        if config.max_tokens is not None and tokens >= config.max_tokens:
+            stop_reason = "BUDGET_TOKENS"
+            break
+
         if not page.get("has_more"):
             stop_reason = "COMPLETE"
             break
@@ -140,7 +177,31 @@ def collect(fetch: Callable[[Optional[dict]], dict], config: CollectorConfig) ->
     return {"stop_reason": stop_reason, "items": items, "item_count": len(items),
             "pages_fetched": pages, "elapsed_s": round(elapsed, 3),
             "provider_errors": provider_errors,
-            "complete": stop_reason == "COMPLETE"}
+            "complete": stop_reason == "COMPLETE",
+            "ledger": {"requests": requests, "tokens": tokens,
+                       "limit_requests": config.max_requests,
+                       "limit_tokens": config.max_tokens},
+            "state": {"items": items, "seen": sorted(seen), "cursor": cursor,
+                      "consecutive_dups": consecutive_dups, "pages": pages,
+                      "provider_errors": provider_errors,
+                      "requests": requests, "tokens": tokens}}
+
+
+def save_snapshot(report: dict) -> dict:
+    """Extract the resumable state from a collect() report (JSON-serializable)."""
+    return {"version": 1, "state": dict(report["state"])}
+
+
+def resume(fetch: Callable[[Optional[dict]], dict], config: CollectorConfig,
+           snapshot: dict) -> dict:
+    """Continue a collection from save_snapshot() output with a fresh budget.
+
+    Duplicate-free guarantee across the seam: seen-keys and cursor are restored
+    verbatim. Note: call-count-dependent provider behavior (e.g. the mock's
+    ambiguous glitch position) restarts with the new fetch closure — pass a
+    provider whose position depends on cursor, not call count, for exact parity.
+    """
+    return collect(fetch, config, state=snapshot.get("state", snapshot))
 
 
 # ---------------------------------------------------------------- mock provider

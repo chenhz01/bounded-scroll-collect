@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.1.2] - 2026-10-11
+
+### Added (anchor differentiation: appium/appium-mcp re-audit)
+
+- **Cost ledger with dual circuit breakers** (`CollectorConfig.max_requests` / `max_tokens` / `default_page_tokens`, report `ledger`, stop reasons `BUDGET_REQUESTS` / `BUDGET_TOKENS`): every fetch is accounted (request count + token cost, provider-reported or flat default) and either cap trips a named stop reason; the page that tripped the token breaker is kept. appium-mcp's README documents no cost/budget semantics for agent-driven sessions.
+- **Checkpoint/resume snapshots** (`save_snapshot` / `resume`, CLI `collect --snapshot` / `resume`): items, seen-keys, cursor, and ledger counters serialize to JSON; resuming with a fresh budget converges to the identical item set as an uninterrupted run with zero duplicates across the seam (test-verified). Resolves the v0.1.1 FAQ's stated "no checkpointing here" limitation for the single-session case.
+- Dedup keys are now stored as canonical strings (behavior-neutral, snapshot-serializable).
+- 8 new self-test cases (21 → 29): request/token breakers, default-token ledger, resume parity, corrupt-snapshot ValueError, max_requests validation, breaker-fires-but-page-kept, two-break resume chain.
+- FAQ and stop-reason table updated (seven → nine reasons); Limits gains token self-reporting and provider-side-state caveats.
+
 ## [0.1.1] - 2026-10-11
 
 ### Changed (round-2 iteration after 16-item self-audit)
